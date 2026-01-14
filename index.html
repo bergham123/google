@@ -1,1 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google Maps Workflow</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; text-align: center; background-color: #f4f4f9; }
+        .container { max-width: 500px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        
+        /* Counter */
+        .counter-box { margin-bottom: 25px; }
+        .counter-number { font-size: 36px; font-weight: bold; color: #4285F4; } /* Google Blue */
 
+        /* Form */
+        input { 
+            padding: 12px; font-size: 16px; width: 100%; 
+            border: 1px solid #ddd; border-radius: 6px; margin-bottom: 15px; box-sizing: border-box;
+        }
+        button { 
+            padding: 12px 20px; font-size: 16px; cursor: pointer; 
+            background-color: #4285F4; color: white; border: none; border-radius: 6px; 
+            transition: background 0.2s; width: 100%;
+        }
+        button:hover { background-color: #3367D6; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        
+        .refresh-btn { background-color: #34A853; margin-top: 10px; } /* Google Green */
+        .refresh-btn:hover { background-color: #2E9442; }
+
+        /* Status */
+        #message-area { margin-top: 20px; font-weight: bold; min-height: 24px; }
+        .success { color: #34A853; }
+        .error { color: #EA4335; }
+        .loading { color: #FBBC05; }
+
+        /* Token */
+        #tokenContainer { display: none; background: #e8f0fe; padding: 10px; border-radius: 5px; margin-bottom: 15px; border: 1px solid #d2e3fc;}
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Google Maps Scraper</h1>
+
+        <div id="tokenContainer">
+            <label style="display:block; margin-bottom:5px; font-weight:bold;">GitHub Token:</label>
+            <input type="password" id="tokenInput" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx">
+        </div>
+
+        <div class="counter-box">
+            Remaining Runs: 
+            <span id="countDisplay" class="counter-number">...</span>
+        </div>
+
+        <button onclick="fetchCounter()" class="refresh-btn">🔄 Refresh Counter</button>
+
+        <hr style="margin: 25px 0; border: 0; border-top: 1px solid #eee;">
+
+        <form id="workflowForm">
+            <input type="text" id="apiParam" placeholder="e.g. restaurants in rabat" required>
+            <button type="submit" id="runBtn">🚀 Start Scraping</button>
+        </form>
+
+        <div id="message-area"></div>
+    </div>
+
+    <script>
+        // --- CONFIGURATION ---
+        const OWNER = "bergham123";   // <--- CHANGE THIS
+        const REPO = "google";   // <--- CHANGE THIS
+        
+        const form = document.getElementById('workflowForm');
+        const messageArea = document.getElementById('message-area');
+        const btn = document.getElementById('runBtn');
+        const countDisplay = document.getElementById('countDisplay');
+        const tokenContainer = document.getElementById('tokenContainer');
+        const tokenInput = document.getElementById('tokenInput');
+
+        // Check URL for Token
+        const urlParams = new URLSearchParams(window.location.search);
+        let GITHUB_TOKEN = urlParams.get('token');
+        if (!GITHUB_TOKEN) tokenContainer.classList.add('show');
+
+        // --- FUNCTIONS ---
+        async function fetchCounter() {
+            const RAW_URL = `https://raw.githubusercontent.com/${OWNER}/${REPO}/main/counter.json?t=${Date.now()}`;
+            try {
+                const res = await fetch(RAW_URL);
+                if (!res.ok) throw new Error("File missing");
+                const data = await res.json();
+                countDisplay.innerText = data.count;
+                countDisplay.style.color = data.count > 0 ? "#4285F4" : "#EA4335";
+            } catch (e) {
+                countDisplay.innerText = "100"; // Default assumption
+            }
+        }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const tokenToUse = GITHUB_TOKEN || tokenInput.value;
+            if (!tokenToUse) return alert("Token required");
+
+            const query = document.getElementById('apiParam').value;
+            
+            messageArea.innerText = "Starting Workflow...";
+            messageArea.className = "loading";
+            btn.disabled = true;
+
+            try {
+                // Trigger GitHub Action
+                const apiUrl = `https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/run-param.yml/dispatches`;
+                const res = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `token ${tokenToUse}`,
+                        'Accept': 'application/vnd.github+json',
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        ref: 'main',
+                        inputs: { api_param: query }
+                    })
+                });
+
+                if (res.ok) {
+                    messageArea.innerText = "✅ Success! Check Actions tab for progress.";
+                    messageArea.className = "success";
+                    setTimeout(fetchCounter, 5000);
+                } else {
+                    messageArea.innerText = "❌ Failed: Check Token/Permissions.";
+                    messageArea.className = "error";
+                }
+            } catch (err) {
+                messageArea.innerText = "❌ Network Error";
+                messageArea.className = "error";
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
+        window.onload = fetchCounter;
+    </script>
+</body>
+</html>
