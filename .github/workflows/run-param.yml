@@ -1,0 +1,70 @@
+name: Run Google Scraper
+
+concurrency:
+  group: main-workflow-group
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_param:
+        description: 'Search Query (e.g. restaurants in rabat)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install beautifulsoup4 playwright
+          playwright install chromium
+
+      # Init Counter
+      - name: Init Counter
+        run: |
+          if [ ! -f counter.json ]; then
+            echo '{"count": 100}' > counter.json
+          fi
+
+      - name: Read Counter
+        id: read_count
+        run: |
+          COUNT=$(node -p "require('./counter.json').count")
+          echo "current_count=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Check Limit
+        run: |
+          if [ ${{ steps.read_count.outputs.current_count }} -le 0 ]; then
+            echo "Limit reached."
+            exit 1
+          fi
+
+      # Run Scraper
+      - name: Run Python Script
+        run: |
+          python scraper.py "${{ github.event.inputs.api_param }}"
+
+      # Decrement and Commit
+      - name: Update Counter & Data
+        run: |
+          NEW_COUNT=$(node -p "require('./counter.json').count - 1")
+          echo "{ \"count\": $NEW_COUNT }" > counter.json
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add counter.json
+          git add data/
+          git diff --staged --quiet || git commit -m "Update Google Scraper results [skip ci]"
+          git push
