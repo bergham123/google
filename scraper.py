@@ -15,7 +15,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DEBUG_DIR = os.path.join(DATA_DIR, "debug_html")
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
-MAX_PAGES = 3  # Number of pages to scrape per query
+MAX_PAGES = 3  # Number of pages to scrape per query (20 results per page)
 DELAY = 3      # Seconds to wait between actions
 RETRIES = 3    # Number of retries per page if proxy fails
 
@@ -44,22 +44,31 @@ def get_random_proxy():
 
 # --- Helper Functions ---
 def extract_coordinates(url):
-    """Extracts Lat/Lon from a Google Maps URL."""
+    """
+    Extracts Lat/Lon from a Google Maps URL inside a search result.
+    Format usually: .../maps/place/.../@34.020,-6.83,17z
+    """
+    # Look for pattern @lat,long,z
     match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', url)
     if match:
         return match.group(1), match.group(2)
     return None, None
 
 # --- Main Scraper ---
-def scrape_google_maps(query):
+def scrape_google_search(query):
     results = []
 
-    logger.info(f"Starting Google Maps scrape for: {query}")
-    with sync_playwright() as p:
-        for attempt in range(RETRIES):
-            proxy_url = get_random_proxy()
-            logger.info(f"Using proxy: {proxy_url} (Attempt {attempt + 1})")
-            try:
+    logger.info(f"Starting Google Search scrape for: {query}")
+    
+    # Loop over proxies if needed (from your original code structure)
+    # We keep the retry loop wrapper
+    
+    for attempt in range(RETRIES):
+        proxy_url = get_random_proxy()
+        logger.info(f"Using proxy: {proxy_url} (Attempt {attempt + 1})")
+        
+        try:
+            with sync_playwright() as p:
                 # Launch browser with proxy
                 browser = p.chromium.launch(
                     headless=True,
@@ -72,58 +81,69 @@ def scrape_google_maps(query):
                 page = context.new_page()
                 page.set_default_timeout(60000)
 
-                # Navigate to search
-                url = f"https://www.google.com/maps/search/{query}"
-                logger.info(f"Navigating to: {url}")
-                page.goto(url, wait_until="domcontentloaded")
+                # Pagination Loop (Using URL parameter 'start')
+                # Google Search standard is usually 20 results per page
+                for page_num in range(0, MAX_PAGES):
+                    start_val = page_num * 20
+                    
+                    # Construct URL exactly as requested
+                    # Format: search?q=phone+number+for+restaurant+in+rabat&udm=1&start=20
+                    safe_query = query.replace(" ", "+")
+                    url = f"https://www.google.com/search?q={safe_query}&udm=1&start={start_val}"
+                    
+                    logger.info(f"--- Processing Page {page_num + 1} -> {url} ---")
 
-                # Wait for sidebar to load
-                try:
-                    page.wait_for_selector("div[role='feed']", timeout=15000)
-                except PlaywrightTimeout:
-                    logger.warning("Sidebar did not load in time. Retrying...")
-                    browser.close()
-                    continue  # retry with a new proxy
+                    page.goto(url, wait_until="domcontentloaded")
+                    
+                    # Wait for results to load
+                    time.sleep(2) # Wait for JS to settle
 
-                # Pagination Loop
-                for page_num in range(1, MAX_PAGES + 1):
-                    logger.info(f"--- Processing Page {page_num} ---")
-
-                    # Scroll to load lazy results
-                    for _ in range(5):
-                        page.mouse.wheel(0, 1000)
-                        time.sleep(1)
-
+                    # --- PARSING ---
                     html = page.content()
                     soup = BeautifulSoup(html, "html.parser")
+                    
+                    items = []
 
-                    items = soup.select("div[role='article']")
+                    # Strategy 1: Try to find the Local Results Map Pack (div with role='list')
+                    # This is where coordinates are usually accessible via links
+                    local_pack = soup.select("div[role='list'] div[role='listitem']")
+                    if local_pack:
+                        items = local_pack
+                        logger.info("Found Local Pack results.")
+                    
+                    # Strategy 2: Fallback to Standard Organic Results (div class='g')
                     if not items:
-                        items = soup.select("div.Nv2PK")  # fallback
+                        items = soup.select("div.g")
+                        logger.info("Found Standard Organic results (Local Pack not detected).")
 
                     logger.info(f"Found {len(items)} items on page.")
 
                     for item in items:
-                        # Name
-                        name_tag = item.select_one("div.fontHeadlineSmall") or item.select_one("div.qBF1Pd")
-                        name = name_tag.get_text(strip=True) if name_tag else "Unknown"
+                        # Name: Try H3 (Standard) or span inside local list item
+                        name_tag = item.select_one("h3") or item.select_one("span")
+                        if not name_tag:
+                            continue
+                        
+                        # Clean name (remove "· Rating" etc if caught)
+                        name = name_tag.get_text(strip=True)
+                        if len(name) > 50: # Likely a description, not a name
+                            name = name[:50] + "..."
 
-                        # Phone
+                        # Phone: Search via Regex
                         phone = None
                         text_content = item.get_text(" ", strip=True)
                         match = PHONE_REGEX.search(text_content)
                         if match:
                             phone = match.group(1).strip()
 
-                        # Coordinates
-                        link_tag = item.select_one("a.hfpxzc")
+                        # Coordinates: Look for a link to "maps.google.com/place"
+                        lat, lon = None, None
+                        link_tag = item.select_one("a[href*='maps.google.com']")
                         if link_tag:
                             href = link_tag.get("href", "")
                             lat, lon = extract_coordinates(href)
-                        else:
-                            lat, lon = None, None
-
-                        # Image
+                        
+                        # Image: Try to find an image tag
                         img_tag = item.select_one("img")
                         image = img_tag.get("src") if img_tag else None
 
@@ -133,50 +153,40 @@ def scrape_google_maps(query):
                             "latitude": lat,
                             "longitude": lon,
                             "image": image,
-                            "source_page": page_num
+                            "source_page": page_num + 1
                         }
 
+                        # Avoid duplicates
                         if not any(r['name'] == entry['name'] and r['phone'] == entry['phone'] for r in results):
-                            results.append(entry)
-                            logger.info(f"✅ {name} | {phone}")
+                            if name:
+                                results.append(entry)
+                                logger.info(f"✅ {name} | {phone}")
 
-                    # Click Next
-                    if page_num < MAX_PAGES:
-                        try:
-                            next_button = page.get_by_role("button", name="Next page")
-                            if next_button.is_visible():
-                                logger.info("Clicking Next Page...")
-                                next_button.click()
-                                time.sleep(DELAY)
-                            else:
-                                logger.info("Next button not found. End of results.")
-                                break
-                        except Exception as e:
-                            logger.warning(f"Could not click next: {e}")
-                            break
-
+                # Success: Save and exit retry loop
                 browser.close()
-                break  # success, exit retry loop
+                
+                # Save JSON
+                safe_name = re.sub(r'[^a-z0-9\-]+', '-', query.lower())
+                now = datetime.now().strftime("%Y-%m-%d-%H-%M")
+                filename = f"{safe_name}-search-{now}.json"
+                filepath = os.path.join(DATA_DIR, filename)
 
-            except Exception as e:
-                logger.warning(f"Proxy {proxy_url} failed: {e}")
-                time.sleep(2)  # small delay before next attempt
-                continue
+                logger.info(f"Saving {len(results)} results to {filepath}")
+                with open(filepath, "w", encoding="utf-8") as f:
+                    json.dump(results, f, ensure_ascii=False, indent=2)
 
-    # Save JSON
-    safe_name = re.sub(r'[^a-z0-9\-]+', '-', query.lower())
-    now = datetime.now().strftime("%Y-%m-%d-%H-%M")
-    filename = f"{safe_name}-google-{now}.json"
-    filepath = os.path.join(DATA_DIR, filename)
+                return results, filename
 
-    logger.info(f"Saving {len(results)} results to {filepath}")
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"Proxy {proxy_url} failed: {e}")
+            time.sleep(2)  # small delay before next attempt
+            continue
 
-    return results, filename
+    return [], "failed"
 
 # --- Main ---
 if __name__ == "__main__":
-    query_arg = sys.argv[1] if len(sys.argv) > 1 else "restaurants in rabat"
-    scrape_google_maps(query_arg)
+    # The input from GitHub Actions workflow comes here
+    query_arg = sys.argv[1] if len(sys.argv) > 1 else "phone number for restaurant in rabat"
+    scrape_google_search(query_arg)
     logger.info("Job finished.")
